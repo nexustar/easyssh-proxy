@@ -23,6 +23,9 @@ import (
 
 var defaultTimeout = 60 * time.Second
 
+// ErrTimeout is a compariable error reported when command run timeout
+var ErrTimeout = fmt.Errorf("Run Command Timeout")
+
 type (
 	// MakeConfig Contains main authority information.
 	// User field should be a name of user on remote server (ex. john in ssh john@example.com).
@@ -337,7 +340,7 @@ func (ssh_conf *MakeConfig) Stream(command string, timeout ...time.Duration) (<-
 			errChan <- session.Wait()
 			doneChan <- true
 		case <-timeoutChan:
-			errChan <- fmt.Errorf("Run Command Timeout")
+			errChan <- ErrTimeout
 			doneChan <- false
 		}
 	}(stdoutScanner, stderrScanner, stdoutChan, stderrChan, doneChan, errChan)
@@ -346,16 +349,18 @@ func (ssh_conf *MakeConfig) Stream(command string, timeout ...time.Duration) (<-
 }
 
 // Run command on remote machine and returns its stdout as a string
-func (ssh_conf *MakeConfig) Run(command string, timeout ...time.Duration) (outStr string, errStr string, isTimeout bool, err error) {
+func (ssh_conf *MakeConfig) Run(command string, timeout ...time.Duration) (outStr string, errStr string, done bool, err error) {
 	stdoutChan, stderrChan, doneChan, errChan, err := ssh_conf.Stream(command, timeout...)
 	if err != nil {
-		return outStr, errStr, isTimeout, err
+		return outStr, errStr, done, err
 	}
 	// read from the output channel until the done signal is passed
 loop:
 	for {
 		select {
-		case isTimeout = <-doneChan:
+		case err = <-errChan:
+			break loop
+		case done = <-doneChan:
 			break loop
 		case outline := <-stdoutChan:
 			if outline != "" {
@@ -365,11 +370,10 @@ loop:
 			if errline != "" {
 				errStr += errline + "\n"
 			}
-		case err = <-errChan:
 		}
 	}
 	// return the concatenation of all signals from the output channel
-	return outStr, errStr, isTimeout, err
+	return outStr, errStr, done, err
 }
 
 // Scp uploads sourceFile to remote machine like native scp console app.
