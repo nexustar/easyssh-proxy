@@ -23,8 +23,8 @@ import (
 
 var defaultTimeout = 60 * time.Second
 
-// ErrTimeout is a compariable error reported when command run timeout
-var ErrTimeout = fmt.Errorf("Run Command Timeout")
+// errTimeout is a compariable error reported when command run timeout
+var errTimeout = fmt.Errorf("Run Command Timeout")
 
 type (
 	// MakeConfig Contains main authority information.
@@ -258,17 +258,16 @@ func (ssh_conf *MakeConfig) Connect() (*ssh.Session, *ssh.Client, error) {
 // Stream returns one channel that combines the stdout and stderr of the command
 // as it is run on the remote machine, and another that sends true when the
 // command is done. The sessions and channels will then be closed.
-func (ssh_conf *MakeConfig) Stream(command string, timeout ...time.Duration) (<-chan string, <-chan string, <-chan bool, <-chan error, error) {
+func (ssh_conf *MakeConfig) Stream(command string, timeout ...time.Duration) (<-chan string, <-chan string, <-chan error, error) {
 	// continuously send the command's output over the channel
 	stdoutChan := make(chan string)
 	stderrChan := make(chan string)
-	doneChan := make(chan bool)
 	errChan := make(chan error)
 
 	// connect to remote host
 	session, client, err := ssh_conf.Connect()
 	if err != nil {
-		return stdoutChan, stderrChan, doneChan, errChan, err
+		return stdoutChan, stderrChan, errChan, err
 	}
 	// defer session.Close()
 	// connect to both outputs (they are of type io.Reader)
@@ -276,29 +275,26 @@ func (ssh_conf *MakeConfig) Stream(command string, timeout ...time.Duration) (<-
 	if err != nil {
 		client.Close()
 		session.Close()
-		return stdoutChan, stderrChan, doneChan, errChan, err
+		return stdoutChan, stderrChan, errChan, err
 	}
 	errReader, err := session.StderrPipe()
 	if err != nil {
 		client.Close()
 		session.Close()
-		return stdoutChan, stderrChan, doneChan, errChan, err
+		return stdoutChan, stderrChan, errChan, err
 	}
 	err = session.Start(command)
 	if err != nil {
 		client.Close()
 		session.Close()
-		return stdoutChan, stderrChan, doneChan, errChan, err
+		return stdoutChan, stderrChan, errChan, err
 	}
 
 	// combine outputs, create a line-by-line scanner
-	stdoutReader := io.MultiReader(outReader)
-	stderrReader := io.MultiReader(errReader)
-	stdoutScanner := bufio.NewScanner(stdoutReader)
-	stderrScanner := bufio.NewScanner(stderrReader)
+	stdoutScanner := bufio.NewScanner(outReader)
+	stderrScanner := bufio.NewScanner(errReader)
 
-	go func(stdoutScanner, stderrScanner *bufio.Scanner, stdoutChan, stderrChan chan string, doneChan chan bool, errChan chan error) {
-		defer close(doneChan)
+	go func(stdoutScanner, stderrScanner *bufio.Scanner, stdoutChan, stderrChan chan string, errChan chan error) {
 		defer close(errChan)
 		defer client.Close()
 		defer session.Close()
@@ -338,19 +334,17 @@ func (ssh_conf *MakeConfig) Stream(command string, timeout ...time.Duration) (<-
 		select {
 		case <-res:
 			errChan <- session.Wait()
-			doneChan <- true
 		case <-timeoutChan:
-			errChan <- ErrTimeout
-			doneChan <- false
+			errChan <- errTimeout
 		}
-	}(stdoutScanner, stderrScanner, stdoutChan, stderrChan, doneChan, errChan)
+	}(stdoutScanner, stderrScanner, stdoutChan, stderrChan, errChan)
 
-	return stdoutChan, stderrChan, doneChan, errChan, err
+	return stdoutChan, stderrChan, errChan, err
 }
 
 // Run command on remote machine and returns its stdout as a string
 func (ssh_conf *MakeConfig) Run(command string, timeout ...time.Duration) (outStr string, errStr string, done bool, err error) {
-	stdoutChan, stderrChan, doneChan, errChan, err := ssh_conf.Stream(command, timeout...)
+	stdoutChan, stderrChan, errChan, err := ssh_conf.Stream(command, timeout...)
 	if err != nil {
 		return outStr, errStr, done, err
 	}
@@ -358,10 +352,6 @@ func (ssh_conf *MakeConfig) Run(command string, timeout ...time.Duration) (outSt
 loop:
 	for {
 		select {
-		case err = <-errChan:
-			break loop
-		case done = <-doneChan:
-			break loop
 		case outline := <-stdoutChan:
 			if outline != "" {
 				outStr += outline + "\n"
@@ -370,10 +360,12 @@ loop:
 			if errline != "" {
 				errStr += errline + "\n"
 			}
+		case err = <-errChan:
+			break loop
 		}
 	}
 	// return the concatenation of all signals from the output channel
-	return outStr, errStr, done, err
+	return outStr, errStr, err == errTimeout, err
 }
 
 // Scp uploads sourceFile to remote machine like native scp console app.
